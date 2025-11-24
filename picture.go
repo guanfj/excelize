@@ -635,10 +635,58 @@ func (f *File) getPicture(row, col int, drawingXML, drawingRelationships string)
 	cond := func(from *xlsxFrom) bool { return from.Col == col && from.Row == row }
 	cond2 := func(from *decodeFrom) bool { return from.Col == col && from.Row == row }
 	cb := func(a *xdrCellAnchor, r *xlsxRelationship) {
+		// 判断 anchor 类型
+		isTwoCell := a.To != nil
+		isOneCell := a.Ext != nil && a.To == nil
+		// 获取显示尺寸 (EMU)
+		cx, cy := int64(0), int64(0)
+		if isOneCell {
+			// oneCellAnchor: Ext 在 anchor 层级
+			cx, cy = int64(a.Ext.Cx), int64(a.Ext.Cy)
+		} else if isTwoCell && a.Pic != nil && a.Pic.SpPr.Xfrm.Ext.Cx > 0 {
+			// twoCellAnchor: Ext 在 Pic.SpPr.Xfrm 中
+			cx = int64(a.Pic.SpPr.Xfrm.Ext.Cx)
+			cy = int64(a.Pic.SpPr.Xfrm.Ext.Cy)
+		}
 		pic := Picture{Extension: filepath.Ext(r.Target), Format: &GraphicOptions{}, InsertType: PictureInsertTypePlaceOverCells}
 		if buffer, _ := f.Pkg.Load(filepath.ToSlash(filepath.Clean("xl/drawings/" + r.Target))); buffer != nil {
 			pic.File = buffer.([]byte)
-			pic.Format.AltText = a.Pic.NvPicPr.CNvPr.Descr
+			// 设置锚点偏移 (来自 Xfrm.Off)
+			if a.Pic != nil {
+				if a.Pic.SpPr.Xfrm.Off.X != 0 {
+					pic.Format.OffsetX = int(a.Pic.SpPr.Xfrm.Off.X)
+					pic.Format.OffsetY = int(a.Pic.SpPr.Xfrm.Off.Y)
+				} else if a.From != nil {
+					pic.Format.OffsetX = int(a.From.ColOff / EMU)
+					pic.Format.OffsetY = int(a.From.RowOff / EMU)
+				}
+				// 设置锁定纵横比
+				pic.Format.LockAspectRatio = a.Pic.NvPicPr.CNvPicPr.PicLocks.NoChangeAspect
+				// 设置替代文字
+				pic.Format.AltText = a.Pic.NvPicPr.CNvPr.Descr
+				// 设置超链接（如果存在）
+				if a.Pic.NvPicPr.CNvPr.HlinkClick != nil {
+					pic.Format.Hyperlink = a.Pic.NvPicPr.CNvPr.HlinkClick.RID
+					pic.Format.HyperlinkType = "External"
+				}
+			}
+			// 计算缩放比例
+			imgCfg, _, err := image.DecodeConfig(bytes.NewReader(pic.File))
+			if err == nil && imgCfg.Width > 0 && imgCfg.Height > 0 {
+				if cx > 0 && cy > 0 {
+					emu := float64(EMU)
+					displayWidthPx := float64(cx) / emu
+					displayHeightPx := float64(cy) / emu
+					pic.Format.ScaleX = displayWidthPx / float64(imgCfg.Width)
+					pic.Format.ScaleY = displayHeightPx / float64(imgCfg.Height)
+				} else {
+					pic.Format.ScaleX = 1.0
+					pic.Format.ScaleY = 1.0
+				}
+			} else {
+				pic.Format.ScaleX = 1.0
+				pic.Format.ScaleY = 1.0
+			}
 			pics = append(pics, pic)
 		}
 	}
